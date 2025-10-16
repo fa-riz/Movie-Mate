@@ -38,7 +38,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="C:\Users\91903\OneDrive\Desktop\MovieMate\backend\venv"
+VIRTUAL_ENV="C:\Users\91903\OneDrive\Desktop\MovieMate - Copy\backend\venv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"
