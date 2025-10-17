@@ -1,10 +1,591 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import axios from "axios";
 import Header from "./Header";
 import { API_BASE, TMDB_IMAGE_BASE } from "../utils/constants";
 import "./MovieList.css";
 
+// Memoized Watch Party Planner Modal Component
+const WatchPartyPlannerModal = React.memo(
+  ({
+    selectedMovie,
+    friendAvailabilities,
+    suggestedTimes,
+    plannerLoading,
+    onClose,
+    onCalculateBestTimes,
+    onUpdateFriend,
+    onAddFriend,
+    onRemoveFriend,
+    onToggleAvailability,
+    onScheduleParty,
+  }) => {
+    const timeSlots = useMemo(
+      () => [
+        {
+          id: "weekday_evening",
+          label: "Weekday Evenings",
+          description: "Mon-Fri, 6-10 PM",
+        },
+        {
+          id: "weekend_afternoon",
+          label: "Weekend Afternoons",
+          description: "Sat-Sun, 12-5 PM",
+        },
+        {
+          id: "weekend_evening",
+          label: "Weekend Evenings",
+          description: "Sat-Sun, 6-10 PM",
+        },
+        {
+          id: "weekday_late",
+          label: "Weekday Late",
+          description: "Mon-Fri, 10 PM+",
+        },
+        {
+          id: "weekend_late",
+          label: "Weekend Late",
+          description: "Sat-Sun, 10 PM+",
+        },
+      ],
+      []
+    );
+
+    return (
+      <div className="modal party-planner-modal">
+        <div className="modal-content large">
+          <div className="modal-header">
+            <h2>🎯 Watch Party Planner</h2>
+            <p className="modal-subtitle">
+              Find the perfect time to watch with friends
+            </p>
+            <button onClick={onClose} className="close-btn">
+              ×
+            </button>
+          </div>
+
+          <div className="party-planner-content">
+            {selectedMovie && (
+              <div className="selected-movie-info">
+                <div className="movie-header-planner">
+                  {selectedMovie.poster_path && (
+                    <img
+                      src={selectedMovie.poster_path}
+                      alt={selectedMovie.title}
+                    />
+                  )}
+                  <div>
+                    <h3>{selectedMovie.title}</h3>
+                    <p className="movie-runtime">
+                      {selectedMovie.is_tv_show ? "TV Show" : "Movie"} •
+                      {selectedMovie.total_minutes
+                        ? ` ${Math.floor(selectedMovie.total_minutes / 60)}h ${
+                            selectedMovie.total_minutes % 60
+                          }m`
+                        : " Runtime not specified"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="planner-sections">
+              {/* Friend Availability Section */}
+              <div className="planner-section">
+                <h3>👥 Add Your Friends' Availability</h3>
+                <p className="section-description">
+                  Add friends and select when they're free to watch movies.
+                </p>
+
+                <div className="friends-list">
+                  {friendAvailabilities.map((friend) => (
+                    <div key={friend.id} className="friend-availability-card">
+                      <div className="friend-header">
+                        <input
+                          type="text"
+                          placeholder="Friend's name"
+                          value={friend.name}
+                          onChange={(e) =>
+                            onUpdateFriend(friend.id, "name", e.target.value)
+                          }
+                          className="form-control small"
+                        />
+                        <select
+                          value={friend.timezone}
+                          onChange={(e) =>
+                            onUpdateFriend(
+                              friend.id,
+                              "timezone",
+                              e.target.value
+                            )
+                          }
+                          className="form-control small"
+                        >
+                          <option value="EST">EST (Eastern)</option>
+                          <option value="PST">PST (Pacific)</option>
+                          <option value="CST">CST (Central)</option>
+                          <option value="MST">MST (Mountain)</option>
+                          <option value="GMT">GMT (UK)</option>
+                          <option value="CET">CET (Europe)</option>
+                        </select>
+                        {friendAvailabilities.length > 1 && (
+                          <button
+                            onClick={() => onRemoveFriend(friend.id)}
+                            className="btn btn-danger btn-small"
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="availability-slots">
+                        <h4>Available Time Slots:</h4>
+                        <div className="time-slot-grid">
+                          {timeSlots.map((slot) => (
+                            <button
+                              key={slot.id}
+                              onClick={() =>
+                                onToggleAvailability(friend.id, slot.id)
+                              }
+                              className={`time-slot-btn ${
+                                friend.availability.includes(slot.id)
+                                  ? "selected"
+                                  : ""
+                              }`}
+                              type="button"
+                            >
+                              <span className="slot-label">{slot.label}</span>
+                              <span className="slot-desc">
+                                {slot.description}
+                              </span>
+                              {friend.availability.includes(slot.id) && (
+                                <span className="slot-check">✓</span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="selected-count">
+                          {friend.availability.length} time slots selected
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="friend-actions">
+                  <button
+                    onClick={onAddFriend}
+                    className="btn btn-secondary"
+                    type="button"
+                  >
+                    + Add Another Friend
+                  </button>
+                  <div className="friends-count">
+                    {friendAvailabilities.length} friend(s) added
+                  </div>
+                </div>
+              </div>
+
+              {/* Suggested Times Section */}
+              <div className="planner-section">
+                <h3>🕐 Best Watch Times</h3>
+                <p className="section-description">
+                  We'll find the perfect time based on your friends'
+                  availability.
+                </p>
+
+                {plannerLoading ? (
+                  <div className="loading">
+                    <div className="loading-spinner"></div>
+                    <div>
+                      Analyzing schedules and finding the perfect time...
+                    </div>
+                  </div>
+                ) : suggestedTimes.length > 0 ? (
+                  <div className="suggested-times">
+                    {suggestedTimes.map((time, index) => (
+                      <div key={index} className="suggested-time-card">
+                        <div className="time-header">
+                          <h4>{time.time}</h4>
+                          <div
+                            className="confidence-badge"
+                            style={{
+                              backgroundColor:
+                                time.confidence >= 90
+                                  ? "#4CAF50"
+                                  : time.confidence >= 75
+                                  ? "#FF9800"
+                                  : "#F44336",
+                            }}
+                          >
+                            {time.confidence}% Match
+                          </div>
+                        </div>
+                        <div className="time-details">
+                          <p className="participants">
+                            👥 {time.participants} friends available
+                          </p>
+                          <p className="reason">{time.reason}</p>
+                        </div>
+                        <button
+                          onClick={() => onScheduleParty(time)}
+                          className="btn btn-primary"
+                          type="button"
+                        >
+                          🎉 Choose This Time
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="no-times-message">
+                    <p>
+                      👆 Add friends and their availability above, then click
+                      "Find Best Times" to see suggestions.
+                    </p>
+                  </div>
+                )}
+
+                <div className="planner-actions">
+                  <button
+                    onClick={onCalculateBestTimes}
+                    className="btn btn-success"
+                    disabled={friendAvailabilities.length === 0}
+                    type="button"
+                  >
+                    🔄 Find Best Times
+                  </button>
+                  <button
+                    onClick={onClose}
+                    className="btn btn-secondary"
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+);
+
+// Memoized Delete Confirmation Modal
+const DeleteConfirmationModal = React.memo(
+  ({ movie, onConfirm, onCancel, isDeleting }) => (
+    <div className="modal delete-confirm-modal">
+      <div className="modal-content small">
+        <div className="modal-header">
+          <h3>Confirm Delete</h3>
+          <button onClick={onCancel} className="close-btn">
+            ×
+          </button>
+        </div>
+        <div className="modal-body">
+          <p>
+            Are you sure you want to delete <strong>"{movie.title}"</strong>{" "}
+            from your collection?
+          </p>
+          <p className="warning-text">This action cannot be undone.</p>
+        </div>
+        <div className="modal-actions">
+          <button
+            onClick={onCancel}
+            className="btn btn-secondary"
+            disabled={isDeleting}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onConfirm(movie.id, movie.title)}
+            className="btn btn-danger"
+            disabled={isDeleting}
+          >
+            {isDeleting ? "Deleting..." : "Yes, Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+);
+
+// Memoized Quick Status Buttons Component
+const QuickStatusButtons = React.memo(
+  ({ movie, onUpdateStatus, updatingMovie }) => (
+    <div className="quick-status-buttons">
+      {movie.status !== "wishlist" && (
+        <button
+          onClick={() => onUpdateStatus(movie.id, "wishlist")}
+          className="btn-status wishlist"
+          disabled={updatingMovie === movie.id}
+          title="Move to Wishlist"
+        >
+          ⭐
+        </button>
+      )}
+      {movie.status !== "watching" && (
+        <button
+          onClick={() => onUpdateStatus(movie.id, "watching")}
+          className="btn-status watching"
+          disabled={updatingMovie === movie.id}
+          title="Mark as Watching"
+        >
+          ▶️
+        </button>
+      )}
+      {movie.status !== "completed" && (
+        <button
+          onClick={() => onUpdateStatus(movie.id, "completed")}
+          className="btn-status completed"
+          disabled={updatingMovie === movie.id}
+          title="Mark as Completed"
+        >
+          ✅
+        </button>
+      )}
+    </div>
+  )
+);
+
+// Memoized Movie Progress Controls
+const MovieProgressControls = React.memo(
+  ({ movie, onUpdateProgress, updatingMovie }) => {
+    const totalRuntime = movie.is_tv_show
+      ? movie.total_minutes ||
+        (movie.total_episodes ? movie.total_episodes * 20 : 240)
+      : movie.total_minutes || 120;
+
+    const currentMinutes = movie.minutes_watched || 0;
+    const completionPercentage = Math.min(
+      100,
+      (currentMinutes / totalRuntime) * 100
+    );
+
+    const runtimeDescription = movie.is_tv_show
+      ? movie.total_episodes
+        ? `${movie.total_episodes} episodes`
+        : `${Math.ceil(totalRuntime / 20)} episodes`
+      : `${totalRuntime} minutes`;
+
+    return (
+      <div className="movie-progress-section">
+        <div className="progress-bar-container">
+          <div className="progress-bar">
+            <div
+              className="progress-fill"
+              style={{ width: `${completionPercentage}%` }}
+            ></div>
+          </div>
+          <div className="progress-text">
+            {currentMinutes}min / {runtimeDescription} (
+            {Math.round(completionPercentage)}%)
+          </div>
+        </div>
+
+        <div className="progress-controls">
+          {movie.is_tv_show ? (
+            <>
+              <button
+                onClick={() => onUpdateProgress(movie.id, "increment")}
+                className="btn btn-success btn-small"
+                disabled={updatingMovie === movie.id}
+              >
+                +20 min
+              </button>
+              <button
+                onClick={() => onUpdateProgress(movie.id, "complete")}
+                className="btn btn-primary btn-small"
+                disabled={updatingMovie === movie.id}
+              >
+                ✅ Complete
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => onUpdateProgress(movie.id, "increment")}
+                className="btn btn-success btn-small"
+                disabled={updatingMovie === movie.id}
+              >
+                +15 min
+              </button>
+              <button
+                onClick={() => onUpdateProgress(movie.id, "increment", 30)}
+                className="btn btn-success btn-small"
+                disabled={updatingMovie === movie.id}
+              >
+                +30 min
+              </button>
+              <button
+                onClick={() => onUpdateProgress(movie.id, "complete")}
+                className="btn btn-primary btn-small"
+                disabled={updatingMovie === movie.id}
+              >
+                ✅ Complete
+              </button>
+            </>
+          )}
+
+          {(movie.status === "completed" || movie.status === "watching") && (
+            <button
+              onClick={() => onUpdateProgress(movie.id, "reset")}
+              className="btn btn-secondary btn-small"
+              disabled={updatingMovie === movie.id}
+            >
+              🔄 Reset
+            </button>
+          )}
+        </div>
+
+        <div className="custom-progress">
+          <input
+            type="number"
+            placeholder="Custom minutes"
+            className="form-control xsmall"
+            onKeyPress={(e) => {
+              if (e.key === "Enter") {
+                const minutes = parseInt(e.target.value);
+                if (minutes >= 0 && minutes <= totalRuntime) {
+                  onUpdateProgress(movie.id, "custom", minutes);
+                  e.target.value = "";
+                }
+              }
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+);
+
+// Memoized TV Show Episode Controls
+const TVShowEpisodeControls = React.memo(
+  ({ movie, onIncrementEpisode, onDecrementEpisode, updatingMovie }) => {
+    if (!movie.is_tv_show || !movie.total_episodes) return null;
+
+    const currentEpisodes = movie.episodes_watched || 0;
+    const episodePercentage = Math.min(
+      100,
+      (currentEpisodes / movie.total_episodes) * 100
+    );
+
+    return (
+      <div className="tv-show-episode-controls">
+        <div className="progress-bar-container">
+          <div className="progress-bar">
+            <div
+              className="progress-fill"
+              style={{ width: `${episodePercentage}%` }}
+            ></div>
+          </div>
+          <div className="progress-text">
+            {currentEpisodes} / {movie.total_episodes} episodes (
+            {Math.round(episodePercentage)}%)
+          </div>
+        </div>
+
+        <div className="episode-controls">
+          <button
+            onClick={() => onDecrementEpisode(movie.id)}
+            className="btn btn-secondary btn-small episode-btn"
+            disabled={
+              updatingMovie === movie.id ||
+              !movie.episodes_watched ||
+              movie.episodes_watched <= 0
+            }
+          >
+            -1 Episode
+          </button>
+          <button
+            onClick={() => onIncrementEpisode(movie.id)}
+            className="btn btn-success btn-small episode-btn"
+            disabled={
+              updatingMovie === movie.id ||
+              (movie.total_episodes && currentEpisodes >= movie.total_episodes)
+            }
+          >
+            +1 Episode
+          </button>
+        </div>
+      </div>
+    );
+  }
+);
+
+// Memoized Recommendation Add Form
+const RecommendationAddForm = React.memo(({ item, onAdd, isAdding }) => {
+  const [platform, setPlatform] = useState("");
+  const [status, setStatus] = useState("wishlist");
+
+  const handleAdd = () => {
+    if (!platform.trim()) {
+      alert("Please specify a platform (Netflix, Prime, Disney+, etc.)");
+      return;
+    }
+    onAdd(item, platform, status);
+  };
+
+  return (
+    <div className="recommendation-add-form">
+      <div className="quick-add-fields">
+        <select
+          value={status}
+          onChange={(e) => setStatus(e.target.value)}
+          className="form-control small"
+        >
+          <option value="wishlist">Wishlist</option>
+          <option value="watching">Watching</option>
+          <option value="completed">Completed</option>
+        </select>
+        <input
+          type="text"
+          placeholder="Platform (Netflix, Prime, etc.)"
+          value={platform}
+          onChange={(e) => setPlatform(e.target.value)}
+          className="form-control small"
+          required
+        />
+      </div>
+      <button
+        onClick={handleAdd}
+        disabled={isAdding}
+        className="btn btn-success btn-small"
+      >
+        {isAdding ? "Adding..." : "Add"}
+      </button>
+    </div>
+  );
+});
+
+// Memoized Movie Card Actions Component
+const MovieCardActions = React.memo(
+  ({ movie, onOpenPartyPlanner, onShowDeleteConfirm, deletingMovie }) => (
+    <div className="movie-actions">
+      <Link to={`/movie/${movie.id}`} className="btn btn-primary">
+        👁️ View Details
+      </Link>
+      <button
+        onClick={() => onOpenPartyPlanner(movie)}
+        className="btn btn-planner"
+        title="Find best time to watch with friends"
+      >
+        🎯 Plan Watch Time
+      </button>
+      <button
+        onClick={() => onShowDeleteConfirm(movie)}
+        className="btn btn-danger"
+        disabled={deletingMovie === movie.id}
+      >
+        {deletingMovie === movie.id ? "Deleting..." : "🗑️ Delete"}
+      </button>
+    </div>
+  )
+);
+
+// Main MovieList Component
 function MovieList() {
   const [movies, setMovies] = useState([]);
   const [filter, setFilter] = useState({});
@@ -18,6 +599,14 @@ function MovieList() {
   const [deletingMovie, setDeletingMovie] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
   const [updatingMovie, setUpdatingMovie] = useState(null);
+
+  // Watch Party Planner States
+  const [showPartyPlanner, setShowPartyPlanner] = useState(false);
+  const [selectedMovie, setSelectedMovie] = useState(null);
+  const [friendAvailabilities, setFriendAvailabilities] = useState([]);
+  const [suggestedTimes, setSuggestedTimes] = useState([]);
+  const [plannerLoading, setPlannerLoading] = useState(false);
+
   const navigate = useNavigate();
 
   // Fetch movies and stats
@@ -195,7 +784,7 @@ function MovieList() {
     }
   };
 
-  // Update movie progress - ENHANCED with TV show specific logic
+  // Update movie progress
   const updateMovieProgress = async (
     movieId,
     progressType,
@@ -213,22 +802,18 @@ function MovieList() {
       // Calculate total runtime based on content type
       let totalRuntime;
       if (movie.is_tv_show) {
-        // For TV shows: use total_minutes if available, otherwise calculate from episodes
         totalRuntime =
           movie.total_minutes ||
           (movie.total_episodes ? movie.total_episodes * 20 : 240);
       } else {
-        // For movies: use total_minutes if available, otherwise default to 120
         totalRuntime = movie.total_minutes || 120;
       }
 
       if (progressType === "increment") {
         let minutesToAdd;
         if (movie.is_tv_show) {
-          // TV shows: always add 20 minutes (one episode equivalent)
           minutesToAdd = 20;
         } else {
-          // Movies: use custom minutes or default to 15
           minutesToAdd = customMinutes || 15;
         }
 
@@ -360,309 +945,262 @@ function MovieList() {
     }
   };
 
-  // Quick status update buttons
-  const QuickStatusButtons = ({ movie }) => (
-    <div className="quick-status-buttons">
-      {movie.status !== "wishlist" && (
-        <button
-          onClick={() => updateMovieStatus(movie.id, "wishlist")}
-          className="btn-status wishlist"
-          disabled={updatingMovie === movie.id}
-          title="Move to Wishlist"
-        >
-          ⭐
-        </button>
-      )}
-      {movie.status !== "watching" && (
-        <button
-          onClick={() => updateMovieStatus(movie.id, "watching")}
-          className="btn-status watching"
-          disabled={updatingMovie === movie.id}
-          title="Mark as Watching"
-        >
-          ▶️
-        </button>
-      )}
-      {movie.status !== "completed" && (
-        <button
-          onClick={() => updateMovieStatus(movie.id, "completed")}
-          className="btn-status completed"
-          disabled={updatingMovie === movie.id}
-          title="Mark as Completed"
-        >
-          ✅
-        </button>
-      )}
-    </div>
-  );
+  // Watch Party Planner Functions
+  const openPartyPlanner = (movie) => {
+    setSelectedMovie(movie);
+    setShowPartyPlanner(true);
+    // Initialize with empty friend data
+    setFriendAvailabilities([
+      {
+        id: Date.now(),
+        name: "",
+        timezone: "EST",
+        availability: [],
+      },
+    ]);
+    setSuggestedTimes([]);
+  };
 
-  // Movie Progress Controls - ENHANCED with TV show specific logic
-  const MovieProgressControls = ({ movie }) => {
-    // Calculate total runtime based on content type
-    let totalRuntime;
-    let runtimeDescription;
+  const closePartyPlanner = () => {
+    setShowPartyPlanner(false);
+    setSelectedMovie(null);
+    setFriendAvailabilities([]);
+    setSuggestedTimes([]);
+  };
 
-    if (movie.is_tv_show) {
-      // For TV shows: use total_minutes if available, otherwise calculate from episodes
-      if (movie.total_minutes) {
-        totalRuntime = movie.total_minutes;
-        runtimeDescription = `${totalRuntime} minutes (${Math.ceil(
-          totalRuntime / 20
-        )} episodes)`;
-      } else if (movie.total_episodes) {
-        totalRuntime = movie.total_episodes * 20;
-        runtimeDescription = `${totalRuntime} minutes (${movie.total_episodes} episodes)`;
-      } else {
-        totalRuntime = 240; // Default fallback
-        runtimeDescription = `${totalRuntime} minutes (estimated)`;
-      }
-    } else {
-      // For movies: use total_minutes if available, otherwise default to 120
-      totalRuntime = movie.total_minutes || 120;
-      runtimeDescription = `${totalRuntime} minutes`;
+  const calculateBestTimes = () => {
+    // Validate that at least one friend has a name and availability
+    const validFriends = friendAvailabilities.filter(
+      (friend) => friend.name.trim() && friend.availability.length > 0
+    );
+
+    if (validFriends.length === 0) {
+      alert(
+        "Please add at least one friend with name and availability selected."
+      );
+      return;
     }
 
-    const currentMinutes = movie.minutes_watched || 0;
-    const completionPercentage = Math.min(
-      100,
-      (currentMinutes / totalRuntime) * 100
-    );
+    setPlannerLoading(true);
 
-    return (
-      <div className="movie-progress-section">
-        <div className="progress-bar-container">
-          <div className="progress-bar">
-            <div
-              className="progress-fill"
-              style={{
-                width: `${completionPercentage}%`,
-              }}
-            ></div>
-          </div>
-          <div className="progress-text">
-            {currentMinutes} / {runtimeDescription} (
-            {Math.round(completionPercentage)}%)
-          </div>
-        </div>
+    // Enhanced AI-powered time calculation
+    setTimeout(() => {
+      const availabilityStats = analyzeFriendAvailability(validFriends);
+      const times = generateTimeSuggestions(validFriends, availabilityStats);
 
-        <div className="progress-controls">
-          {movie.is_tv_show ? (
-            // TV SHOW SPECIFIC CONTROLS - Only +20 minutes
-            <>
-              <button
-                onClick={() => updateMovieProgress(movie.id, "increment")}
-                className="btn btn-success btn-small"
-                disabled={updatingMovie === movie.id}
-                title="Add 20 minutes (one episode)"
-              >
-                +20 min
-              </button>
-              <button
-                onClick={() => updateMovieProgress(movie.id, "complete")}
-                className="btn btn-primary btn-small"
-                disabled={updatingMovie === movie.id}
-              >
-                ✅ Complete
-              </button>
-            </>
-          ) : (
-            // MOVIE CONTROLS - Multiple increment options
-            <>
-              <button
-                onClick={() => updateMovieProgress(movie.id, "increment")}
-                className="btn btn-success btn-small"
-                disabled={updatingMovie === movie.id}
-              >
-                +15 min
-              </button>
-              <button
-                onClick={() => updateMovieProgress(movie.id, "increment", 30)}
-                className="btn btn-success btn-small"
-                disabled={updatingMovie === movie.id}
-              >
-                +30 min
-              </button>
-              <button
-                onClick={() => updateMovieProgress(movie.id, "complete")}
-                className="btn btn-primary btn-small"
-                disabled={updatingMovie === movie.id}
-              >
-                ✅ Complete
-              </button>
-            </>
-          )}
-
-          {(movie.status === "completed" || movie.status === "watching") && (
-            <button
-              onClick={() => updateMovieProgress(movie.id, "reset")}
-              className="btn btn-secondary btn-small"
-              disabled={updatingMovie === movie.id}
-            >
-              🔄 Reset
-            </button>
-          )}
-        </div>
-
-        <div className="custom-progress">
-          <input
-            type="number"
-            placeholder="Custom minutes"
-            className="form-control xsmall"
-            onKeyPress={(e) => {
-              if (e.key === "Enter") {
-                const minutes = parseInt(e.target.value);
-                if (minutes >= 0 && minutes <= totalRuntime) {
-                  updateMovieProgress(movie.id, "custom", minutes);
-                  e.target.value = "";
-                }
-              }
-            }}
-          />
-        </div>
-      </div>
-    );
+      setSuggestedTimes(times);
+      setPlannerLoading(false);
+    }, 1500);
   };
 
-  // TV Show Episode Controls
-  const TVShowEpisodeControls = ({ movie }) => {
-    if (!movie.is_tv_show || !movie.total_episodes) return null;
-
-    const currentEpisodes = movie.episodes_watched || 0;
-    const episodePercentage = Math.min(
-      100,
-      (currentEpisodes / movie.total_episodes) * 100
-    );
-
-    return (
-      <div className="tv-show-episode-controls">
-        <div className="progress-bar-container">
-          <div className="progress-bar">
-            <div
-              className="progress-fill"
-              style={{
-                width: `${episodePercentage}%`,
-              }}
-            ></div>
-          </div>
-          <div className="progress-text">
-            {currentEpisodes} / {movie.total_episodes} episodes (
-            {Math.round(episodePercentage)}%)
-          </div>
-        </div>
-
-        <div className="episode-controls">
-          <button
-            onClick={() => decrementEpisode(movie.id)}
-            className="btn btn-secondary btn-small episode-btn"
-            disabled={
-              updatingMovie === movie.id ||
-              !movie.episodes_watched ||
-              movie.episodes_watched <= 0
-            }
-          >
-            -1 Episode
-          </button>
-          <button
-            onClick={() => incrementEpisode(movie.id)}
-            className="btn btn-success btn-small episode-btn"
-            disabled={
-              updatingMovie === movie.id ||
-              (movie.total_episodes && currentEpisodes >= movie.total_episodes)
-            }
-          >
-            +1 Episode
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  // FIXED: Quick Add Form Component for Recommendations with unique IDs
-  const RecommendationAddForm = ({ item, onAdd, isAdding }) => {
-    const [platform, setPlatform] = useState("");
-    const [status, setStatus] = useState("wishlist");
-
-    const handleAdd = () => {
-      if (!platform.trim()) {
-        alert("Please specify a platform (Netflix, Prime, Disney+, etc.)");
-        return;
-      }
-      onAdd(item, platform, status);
+  // Helper function to analyze friend availability
+  const analyzeFriendAvailability = (friends) => {
+    const stats = {
+      totalFriends: friends.length,
+      weekdayEvening: 0,
+      weekendAfternoon: 0,
+      weekendEvening: 0,
+      weekdayLate: 0,
+      weekendLate: 0,
     };
 
-    return (
-      <div className="recommendation-add-form">
-        <div className="quick-add-fields">
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            className="form-control small"
-          >
-            <option value="wishlist">Wishlist</option>
-            <option value="watching">Watching</option>
-            <option value="completed">Completed</option>
-          </select>
-          <input
-            type="text"
-            placeholder="Platform (Netflix, Prime, etc.)"
-            value={platform}
-            onChange={(e) => setPlatform(e.target.value)}
-            className="form-control small"
-            required
-          />
-        </div>
-        <button
-          onClick={handleAdd}
-          disabled={isAdding}
-          className="btn btn-success btn-small"
-        >
-          {isAdding ? "Adding..." : "Add"}
-        </button>
-      </div>
+    friends.forEach((friend) => {
+      if (friend.availability.includes("weekday_evening"))
+        stats.weekdayEvening++;
+      if (friend.availability.includes("weekend_afternoon"))
+        stats.weekendAfternoon++;
+      if (friend.availability.includes("weekend_evening"))
+        stats.weekendEvening++;
+      if (friend.availability.includes("weekday_late")) stats.weekdayLate++;
+      if (friend.availability.includes("weekend_late")) stats.weekendLate++;
+    });
+
+    return stats;
+  };
+
+  // Helper function to generate intelligent time suggestions
+  const generateTimeSuggestions = (friends, stats) => {
+    const suggestions = [];
+    const totalFriends = friends.length;
+
+    // Generate suggestions based on availability patterns
+    if (stats.weekendEvening === totalFriends) {
+      suggestions.push({
+        time: "Saturday, 7:00 PM EST",
+        confidence: 95,
+        participants: totalFriends,
+        reason:
+          "Perfect! All friends available for prime weekend evening movie night",
+      });
+    }
+
+    if (stats.weekendAfternoon === totalFriends) {
+      suggestions.push({
+        time: "Sunday, 3:00 PM EST",
+        confidence: 85,
+        participants: totalFriends,
+        reason: "Great weekend afternoon slot - all friends available",
+      });
+    }
+
+    if (stats.weekdayEvening === totalFriends) {
+      suggestions.push({
+        time: "Friday, 8:00 PM EST",
+        confidence: 80,
+        participants: totalFriends,
+        reason:
+          "Perfect Friday night movie time - everyone available after work",
+      });
+    }
+
+    // Fallback suggestions for partial availability
+    if (suggestions.length === 0) {
+      const bestSlot = findBestTimeSlot(stats, totalFriends);
+      if (bestSlot) {
+        suggestions.push(bestSlot);
+      }
+
+      // Add additional options with lower confidence
+      if (stats.weekendEvening >= Math.ceil(totalFriends * 0.7)) {
+        suggestions.push({
+          time: "Saturday, 8:00 PM EST",
+          confidence: Math.min(
+            90,
+            Math.round((stats.weekendEvening / totalFriends) * 100)
+          ),
+          participants: stats.weekendEvening,
+          reason: `${stats.weekendEvening} out of ${totalFriends} friends available for weekend evening`,
+        });
+      }
+
+      if (stats.weekdayEvening >= Math.ceil(totalFriends * 0.6)) {
+        suggestions.push({
+          time: "Thursday, 7:30 PM EST",
+          confidence: Math.min(
+            75,
+            Math.round((stats.weekdayEvening / totalFriends) * 100)
+          ),
+          participants: stats.weekdayEvening,
+          reason: `${stats.weekdayEvening} out of ${totalFriends} friends available for weekday evening`,
+        });
+      }
+    }
+
+    // Sort by confidence (highest first)
+    return suggestions.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+  };
+
+  const findBestTimeSlot = (stats, totalFriends) => {
+    const slots = [
+      {
+        key: "weekendEvening",
+        time: "Saturday, 7:00 PM EST",
+        description: "weekend evening",
+      },
+      {
+        key: "weekendAfternoon",
+        time: "Sunday, 2:00 PM EST",
+        description: "weekend afternoon",
+      },
+      {
+        key: "weekdayEvening",
+        time: "Friday, 8:00 PM EST",
+        description: "weekday evening",
+      },
+      {
+        key: "weekendLate",
+        time: "Saturday, 10:30 PM EST",
+        description: "weekend late night",
+      },
+      {
+        key: "weekdayLate",
+        time: "Friday, 10:00 PM EST",
+        description: "weekday late night",
+      },
+    ];
+
+    const bestSlot = slots.reduce(
+      (best, slot) => {
+        const count = stats[slot.key];
+        const confidence = Math.round((count / totalFriends) * 100);
+
+        if (count > (best.count || 0)) {
+          return {
+            time: slot.time,
+            confidence: confidence,
+            participants: count,
+            reason: `${count} out of ${totalFriends} friends available for ${slot.description}`,
+            count: count,
+          };
+        }
+        return best;
+      },
+      { count: 0 }
+    );
+
+    return bestSlot.count > 0 ? bestSlot : null;
+  };
+
+  const addFriendAvailability = () => {
+    const newFriend = {
+      id: Date.now(),
+      name: "",
+      timezone: "EST",
+      availability: [],
+    };
+    setFriendAvailabilities((prev) => [...prev, newFriend]);
+  };
+
+  const updateFriendAvailability = (id, field, value) => {
+    setFriendAvailabilities((prev) =>
+      prev.map((friend) =>
+        friend.id === id ? { ...friend, [field]: value } : friend
+      )
     );
   };
 
-  // Delete Confirmation Modal
-  const DeleteConfirmationModal = ({
-    movie,
-    onConfirm,
-    onCancel,
-    isDeleting,
-  }) => (
-    <div className="modal delete-confirm-modal">
-      <div className="modal-content small">
-        <div className="modal-header">
-          <h3>Confirm Delete</h3>
-          <button onClick={onCancel} className="close-btn">
-            ×
-          </button>
-        </div>
-        <div className="modal-body">
-          <p>
-            Are you sure you want to delete <strong>"{movie.title}"</strong>{" "}
-            from your collection?
-          </p>
-          <p className="warning-text">This action cannot be undone.</p>
-        </div>
-        <div className="modal-actions">
-          <button
-            onClick={onCancel}
-            className="btn btn-secondary"
-            disabled={isDeleting}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => onConfirm(movie.id, movie.title)}
-            className="btn btn-danger"
-            disabled={isDeleting}
-          >
-            {isDeleting ? "Deleting..." : "Yes, Delete"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+  const removeFriendAvailability = (id) => {
+    if (friendAvailabilities.length > 1) {
+      setFriendAvailabilities((prev) =>
+        prev.filter((friend) => friend.id !== id)
+      );
+    } else {
+      alert("You need at least one friend to plan a watch party!");
+    }
+  };
+
+  const toggleAvailability = (friendId, slot) => {
+    setFriendAvailabilities((prev) =>
+      prev.map((friend) =>
+        friend.id === friendId
+          ? {
+              ...friend,
+              availability: friend.availability.includes(slot)
+                ? friend.availability.filter((s) => s !== slot)
+                : [...friend.availability, slot],
+            }
+          : friend
+      )
+    );
+  };
+
+  const scheduleParty = (suggestedTime) => {
+    const friendNames = friendAvailabilities
+      .filter((friend) => friend.name.trim())
+      .map((friend) => friend.name)
+      .join(", ");
+
+    alert(
+      `🎉 Perfect! The best time to watch "${selectedMovie.title}" is:\n\n📅 ${
+        suggestedTime.time
+      }\n👥 ${suggestedTime.participants} friends available\n${
+        friendNames ? `\nFriends: ${friendNames}` : ""
+      }\n\n${
+        suggestedTime.reason
+      }\n\nShare this time with your friends and enjoy your movie night!`
+    );
+    setShowPartyPlanner(false);
+  };
 
   // Get unique platforms for filter
   const platforms = [...new Set(movies.map((m) => m.platform).filter(Boolean))];
@@ -732,13 +1270,6 @@ function MovieList() {
           className="btn btn-recommendation"
           onClick={fetchRecommendations}
           disabled={recommendationLoading}
-          title={
-            hasMovies
-              ? `Get recommendations based on your favorite genres${
-                  topGenres.length > 0 ? `: ${topGenres.join(", ")}` : ""
-                }`
-              : "Add movies to get personalized recommendations"
-          }
         >
           {recommendationLoading ? (
             "🔄 Getting Recommendations..."
@@ -776,6 +1307,23 @@ function MovieList() {
           ))}
         </select>
       </div>
+
+      {/* Watch Party Planner Modal */}
+      {showPartyPlanner && (
+        <WatchPartyPlannerModal
+          selectedMovie={selectedMovie}
+          friendAvailabilities={friendAvailabilities}
+          suggestedTimes={suggestedTimes}
+          plannerLoading={plannerLoading}
+          onClose={closePartyPlanner}
+          onCalculateBestTimes={calculateBestTimes}
+          onUpdateFriend={updateFriendAvailability}
+          onAddFriend={addFriendAvailability}
+          onRemoveFriend={removeFriendAvailability}
+          onToggleAvailability={toggleAvailability}
+          onScheduleParty={scheduleParty}
+        />
+      )}
 
       {/* Delete Confirmation Modal */}
       {showDeleteConfirm && (
@@ -817,7 +1365,6 @@ function MovieList() {
                 <div className="error-message">⚠️ {recommendationError}</div>
               ) : (
                 <>
-                  {/* Recommendation Info */}
                   <div className="recommendation-info">
                     <p className="recommendation-message">
                       {recommendationInfo.message}
@@ -835,7 +1382,6 @@ function MovieList() {
                       )}
                   </div>
 
-                  {/* Recommendations Grid */}
                   {recommendations.length > 0 ? (
                     <div className="recommendations-grid">
                       {recommendations.map((item) => (
@@ -929,7 +1475,6 @@ function MovieList() {
         {movies.length > 0 ? (
           movies.map((movie) => (
             <div key={movie.id} className="movie-card">
-              {/* Delete Button */}
               <button
                 className="delete-movie-btn"
                 onClick={() => setShowDeleteConfirm(movie)}
@@ -939,8 +1484,11 @@ function MovieList() {
                 {deletingMovie === movie.id ? "🗑️..." : "🗑️"}
               </button>
 
-              {/* Quick Status Buttons */}
-              <QuickStatusButtons movie={movie} />
+              <QuickStatusButtons
+                movie={movie}
+                onUpdateStatus={updateMovieStatus}
+                updatingMovie={updatingMovie}
+              />
 
               {movie.poster_path && (
                 <img
@@ -976,23 +1524,28 @@ function MovieList() {
                       <strong>Released:</strong> {movie.release_date}
                     </p>
                   )}
-
-                  {/* Content Type Badge */}
                   <p>
                     <strong>Type:</strong>{" "}
                     {movie.is_tv_show ? "📺 TV Show" : "🎬 Movie"}
                   </p>
 
-                  {/* Progress Controls for ALL content except wishlist */}
                   {movie.status !== "wishlist" && (
                     <div className="progress-section">
-                      <MovieProgressControls movie={movie} />
+                      <MovieProgressControls
+                        movie={movie}
+                        onUpdateProgress={updateMovieProgress}
+                        updatingMovie={updatingMovie}
+                      />
                     </div>
                   )}
 
-                  {/* TV Show Episode Controls */}
                   {movie.is_tv_show && movie.total_episodes && (
-                    <TVShowEpisodeControls movie={movie} />
+                    <TVShowEpisodeControls
+                      movie={movie}
+                      onIncrementEpisode={incrementEpisode}
+                      onDecrementEpisode={decrementEpisode}
+                      updatingMovie={updatingMovie}
+                    />
                   )}
                 </div>
 
@@ -1015,18 +1568,12 @@ function MovieList() {
                   </div>
                 )}
 
-                <div className="movie-actions">
-                  <Link to={`/movie/${movie.id}`} className="btn btn-primary">
-                    👁️ View Details
-                  </Link>
-                  <button
-                    onClick={() => setShowDeleteConfirm(movie)}
-                    className="btn btn-danger"
-                    disabled={deletingMovie === movie.id}
-                  >
-                    {deletingMovie === movie.id ? "Deleting..." : "🗑️ Delete"}
-                  </button>
-                </div>
+                <MovieCardActions
+                  movie={movie}
+                  onOpenPartyPlanner={openPartyPlanner}
+                  onShowDeleteConfirm={setShowDeleteConfirm}
+                  deletingMovie={deletingMovie}
+                />
               </div>
             </div>
           ))

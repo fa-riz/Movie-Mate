@@ -13,6 +13,7 @@ import sqlite3
 import json
 from functools import lru_cache
 import random
+import uuid
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +30,10 @@ TMDB_ACCESS_TOKEN = os.getenv('TMDB_ACCESS_TOKEN', '')
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
+# AI21 Configuration
+AI21_API_KEY = os.getenv('AI21_API_KEY', '')
+AI21_BASE_URL = "https://api.ai21.com/studio/v1"
+
 # TMDB Genre IDs Mapping
 TMDB_GENRE_IDS = {
     "Action": 28, "Adventure": 12, "Animation": 16, "Comedy": 35,
@@ -37,10 +42,6 @@ TMDB_GENRE_IDS = {
     "Mystery": 9648, "Romance": 10749, "Science Fiction": 878,
     "TV Movie": 10770, "Thriller": 53, "War": 10752, "Western": 37
 }
-
-# Hugging Face Configuration
-HUGGING_FACE_API_KEY = os.getenv('HUGGING_FACE_API_KEY', '')
-HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
 
 # Constants
 EPISODE_DURATION_MINUTES = 20  # Average episode duration in minutes
@@ -71,6 +72,20 @@ class Movie(Base):
     overview = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# Party Room Model
+class PartyRoom(Base):
+    __tablename__ = "party_rooms"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String, unique=True, index=True)
+    movie_id = Column(Integer)
+    movie_title = Column(String)
+    movie_poster = Column(String, nullable=True)
+    host_id = Column(String)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    members = Column(Text, default="[]")  # Store as JSON string
+
 # Database Migration Function
 def migrate_database():
     """Add new columns to existing database and fix null values"""
@@ -93,6 +108,25 @@ def migrate_database():
             print("🔄 Adding total_minutes column...")
             cursor.execute("ALTER TABLE movies ADD COLUMN total_minutes INTEGER")
             migrations_applied.append("total_minutes")
+        
+        # Check if party_rooms table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='party_rooms'")
+        if not cursor.fetchone():
+            print("🔄 Creating party_rooms table...")
+            cursor.execute("""
+                CREATE TABLE party_rooms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT UNIQUE,
+                    movie_id INTEGER,
+                    movie_title TEXT,
+                    movie_poster TEXT,
+                    host_id TEXT,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    members TEXT DEFAULT '[]'
+                )
+            """)
+            migrations_applied.append("party_rooms")
         
         # Fix any null values in episodes_watched and minutes_watched
         print("🔄 Fixing null values in episodes_watched...")
@@ -196,6 +230,7 @@ class RatingReviewUpdate(BaseModel):
 class ReviewGenerationRequest(BaseModel):
     user_notes: str = ""
     rating: Optional[float] = None
+    length: Optional[str] = "medium"  # short, medium, long
 
 class ReviewGenerationResponse(BaseModel):
     review: str
@@ -209,45 +244,105 @@ class RecommendationResponse(BaseModel):
     based_on: List[str]
     message: str
 
-# AI Review Generator - IMPROVED VERSION
-class AIReviewGenerator:
+# NEW: Test Review Request Model with length parameter
+class TestReviewRequest(BaseModel):
+    title: Optional[str] = None
+    rating: Optional[float] = None
+    user_notes: str = ""
+    length: Optional[str] = "medium"  # short, medium, long
+
+# Party Watcher Models
+class PartyRoomBase(BaseModel):
+    movie_id: int
+    movie_title: str
+    movie_poster: Optional[str] = None
+    host_id: str
+
+class PartyRoomCreate(PartyRoomBase):
+    pass
+
+class PartyRoomResponse(PartyRoomBase):
+    id: int
+    code: str
+    created_at: datetime
+    is_active: bool
+    members: List[Dict[str, Any]] = []
+
+class PartyJoinRequest(BaseModel):
+    room_code: str
+    user_id: str
+    user_name: str
+
+class PartySyncRequest(BaseModel):
+    room_code: str
+    action: str  # play, pause, seek
+    timestamp: int
+
+class PartyMember(BaseModel):
+    id: str
+    name: str
+    is_host: bool = False
+    joined_at: datetime
+
+class PartyStartRequest(BaseModel):
+    room_code: str
+
+# AI21 Review Generator - ENHANCED WITH LENGTH CONTROL AND NO "ADDITIONAL NOTES"
+class AI21ReviewGenerator:
     def __init__(self):
-        self.api_key = HUGGING_FACE_API_KEY
-        self.api_url = HUGGING_FACE_API_URL
-        self.headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        self.api_key = AI21_API_KEY
+        self.base_url = "https://api.ai21.com/studio/v1"  # FIXED: Use base URL only
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        } if self.api_key else {}
         
         if not self.api_key:
-            print("⚠️  No Hugging Face API key found. AI reviews disabled.")
+            print("⚠️  No AI21 API key found. AI reviews disabled.")
         else:
-            print("✅ AI Review Generator initialized")
+            print("✅ AI21 Review Generator initialized")
     
-    def generate_review(self, title: str, user_notes: str = "", rating: Optional[float] = None):
+    def generate_review(self, title: str, user_notes: str = "", rating: Optional[float] = None, length: str = "medium"):
         if not self.api_key:
-            return self._get_fallback_review(title, user_notes, rating)
+            return self._get_fallback_review(title, user_notes, rating, length)
         
         try:
-            prompt = self._build_prompt(title, user_notes, rating)
+            prompt = self._build_prompt(title, user_notes, rating, length)
+            
+            # Adjust tokens based on length
+            length_tokens = {
+                "short": 100,
+                "medium": 200, 
+                "long": 300
+            }
+            max_tokens = length_tokens.get(length, 200)
             
             payload = {
-                "inputs": prompt,
-                "parameters": {
-                    "max_length": 300,
-                    "temperature": 0.8,
-                    "do_sample": True,
-                    "return_full_text": False,
-                    "max_new_tokens": 200,
-                },
-                "options": {
-                    "wait_for_model": True,
+                "prompt": prompt,
+                "numResults": 1,
+                "maxTokens": max_tokens,
+                "temperature": 0.7,
+                "topKReturn": 0,
+                "topP": 1,
+                "stopSequences": ["\n\n", "Review:", "Rating:"],
+                "countPenalty": {
+                    "scale": 0,
+                    "applyToNumbers": False,
+                    "applyToPunctuations": False,
+                    "applyToStopwords": False,
+                    "applyToWhitespaces": False,
+                    "applyToEmojis": False
                 }
             }
             
-            print(f"🤖 Generating AI review for: {title}")
+            print(f"🤖 Generating AI21 review for: {title} (length: {length})")
+            
+            # FIXED: Use correct endpoint URL
             response = requests.post(
-                self.api_url, 
-                headers=self.headers, 
+                f"{self.base_url}/j2-ultra/complete",
+                headers=self.headers,
                 json=payload,
-                timeout=45  # Increased timeout
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -255,126 +350,210 @@ class AIReviewGenerator:
                 generated_text = self._extract_generated_text(result)
                 if generated_text:
                     cleaned_text = self._clean_text(generated_text)
-                    print(f"✅ AI review generated successfully")
+                    print(f"✅ AI21 review generated successfully (length: {length})")
                     return cleaned_text
+            else:
+                print(f"❌ AI21 API returned status {response.status_code}: {response.text}")
             
             # If we get here, the API call failed
-            print(f"❌ AI API returned status {response.status_code}")
-            return self._get_fallback_review(title, user_notes, rating)
+            return self._get_fallback_review(title, user_notes, rating, length)
             
         except requests.exceptions.Timeout:
-            print("❌ AI request timed out")
-            return self._get_fallback_review(title, user_notes, rating)
+            print("❌ AI21 request timed out")
+            return self._get_fallback_review(title, user_notes, rating, length)
         except requests.exceptions.ConnectionError:
-            print("❌ AI service connection error")
-            return self._get_fallback_review(title, user_notes, rating)
+            print("❌ AI21 service connection error")
+            return self._get_fallback_review(title, user_notes, rating, length)
         except Exception as e:
-            print(f"❌ AI error: {e}")
-            return self._get_fallback_review(title, user_notes, rating)
+            print(f"❌ AI21 error: {e}")
+            return self._get_fallback_review(title, user_notes, rating, length)
     
-    def _build_prompt(self, title: str, user_notes: str, rating: Optional[float] = None):
-        """Build a better prompt for review generation"""
+    def _build_prompt(self, title: str, user_notes: str = "", rating: Optional[float] = None, length: str = "medium"):
+        """Build a sophisticated prompt for AI21 review generation with length control"""
+        
+        # Length-specific instructions
+        length_instructions = {
+            "short": "Write a VERY SHORT and concise film review (2-3 sentences maximum). Focus only on the most important aspects. Be direct and to the point. Avoid lengthy analysis.",
+            "medium": "Write a standard length film review (4-6 sentences). Provide balanced analysis of key elements while maintaining readability.",
+            "long": "Write a detailed, comprehensive film review. Explore various aspects in depth including narrative structure, character development, and technical execution."
+        }
+        
         prompt_parts = []
         
-        # Base instruction
-        prompt_parts.append(f"Write a thoughtful movie review for '{title}'.")
+        # Add length-specific instruction
+        prompt_parts.append(length_instructions.get(length, length_instructions["medium"]))
+        prompt_parts.append(f"Review the film: '{title}'.")
         
         # Add rating context if available
         if rating is not None:
-            if rating >= 8:
-                sentiment = "very positive"
-            elif rating >= 6:
-                sentiment = "positive but balanced"
-            elif rating >= 4:
-                sentiment = "mixed"
-            else:
-                sentiment = "critical"
-            prompt_parts.append(f"The review should be {sentiment} since it's rated {rating}/10.")
+            rating_context = {
+                9.0: "an outstanding masterpiece that exceeds expectations",
+                8.0: "an excellent film with remarkable qualities", 
+                7.0: "a very good movie with strong elements",
+                6.0: "a decent film with some notable aspects",
+                5.0: "a mediocre film with mixed qualities",
+                4.0: "a below-average film with significant flaws",
+                3.0: "a poor film with major issues",
+                2.0: "a very disappointing film",
+                1.0: "an exceptionally bad film"
+            }
+            
+            # Find the closest rating context
+            closest_rating = min(rating_context.keys(), key=lambda x: abs(x - rating))
+            sentiment = rating_context[closest_rating]
+            prompt_parts.append(f"The review should reflect that this is {sentiment} (rated {rating}/10).")
         
-        # Add user notes if provided
+        # FIXED: Better user notes integration - NO "Additional notes" appendage
         if user_notes.strip():
-            prompt_parts.append(f"Incorporate these points: {user_notes}")
+            prompt_parts.append(f"Focus your analysis on these aspects: {user_notes}")
+            prompt_parts.append("Integrate these points naturally into your review without using phrases like 'Additional notes' or 'Viewer observations'.")
         
-        # Add structure guidance
-        prompt_parts.append("The review should discuss plot, characters, and overall impression. Keep it concise and engaging.")
+        # Add structure guidance based on length
+        if length == "short":
+            prompt_parts.extend([
+                "Structure for short review:",
+                "- First sentence: Overall impression and rating context",
+                "- Second sentence: Key strength or standout element", 
+                "- Third sentence: Final recommendation or summary thought",
+                "Be extremely concise - every word must count!"
+            ])
+        elif length == "medium":
+            prompt_parts.extend([
+                "The review should analyze:",
+                "- Overall impression and rating context",
+                "- Key strengths and standout elements",
+                "- Any notable weaknesses (if applicable)",
+                "- Final recommendation and summary"
+            ])
+        else:  # long
+            prompt_parts.extend([
+                "The review should provide comprehensive analysis of:",
+                "- Plot structure and narrative flow", 
+                "- Character development and performances",
+                "- Directing style and technical execution",
+                "- Thematic elements and emotional impact",
+                "- Overall audience appeal and lasting impression"
+            ])
         
-        # Add closing
-        prompt_parts.append("Review:")
+        # Common instructions
+        prompt_parts.extend([
+            "Write in a professional critic's voice.",
+            "Avoid spoilers and focus on the overall viewing experience.",
+            "Ensure the review flows naturally and engages the reader.",
+            "DO NOT use phrases like 'Additional notes:', 'Viewer observations:', or similar appendages."
+        ])
         
-        return " ".join(prompt_parts)
+        return "\n".join(prompt_parts)
     
     def _extract_generated_text(self, result):
-        """Extract generated text from different response formats"""
-        if isinstance(result, list) and len(result) > 0:
-            return result[0].get('generated_text', '').strip()
-        elif isinstance(result, dict):
-            return result.get('generated_text', '').strip()
-        return ""
+        """Extract generated text from AI21 response"""
+        try:
+            if 'completions' in result and len(result['completions']) > 0:
+                return result['completions'][0]['data']['text'].strip()
+            return ""
+        except (KeyError, IndexError) as e:
+            print(f"❌ Error extracting AI21 response: {e}")
+            return ""
     
     def _clean_text(self, text: str):
         """Clean and format the generated text"""
         text = text.strip()
         
-        # Remove the prompt if it's included in the response
-        if "Write a thoughtful movie review for" in text:
-            # Find where the actual review starts
-            lines = text.split('\n')
-            for i, line in enumerate(lines):
-                if line.strip() and "review" not in line.lower() and "write" not in line.lower():
-                    text = '\n'.join(lines[i:]).strip()
-                    break
-        
-        # Ensure proper punctuation
+        # Remove any trailing incomplete sentences
         if text and text[-1] not in ['.', '!', '?']:
-            text += '.'
+            last_period = text.rfind('.')
+            last_exclamation = text.rfind('!')
+            last_question = text.rfind('?')
+            last_punctuation = max(last_period, last_exclamation, last_question)
+            
+            if last_punctuation != -1:
+                text = text[:last_punctuation + 1]
         
-        # Remove any duplicate sentences or weird repetitions
-        sentences = text.split('. ')
-        unique_sentences = []
-        for sentence in sentences:
-            if sentence and sentence not in unique_sentences:
-                unique_sentences.append(sentence)
+        # Remove any rating numbers that might have been generated
+        lines = text.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            if not any(phrase in line.lower() for phrase in ['rating:', 'score:', '/10', '/5']):
+                cleaned_lines.append(line)
         
-        return '. '.join(unique_sentences).strip()
+        text = '\n'.join(cleaned_lines).strip()
+        
+        # Ensure the review starts properly
+        if text.lower().startswith('the review:'):
+            text = text[11:].strip()
+        elif text.lower().startswith('review:'):
+            text = text[7:].strip()
+        
+        # Remove any "Additional notes" appendages that might have been generated
+        if "Additional notes:" in text:
+            text = text.split("Additional notes:")[0].strip()
+        if "Viewer observations:" in text:
+            text = text.split("Viewer observations:")[0].strip()
+        
+        # Capitalize first letter
+        if text and len(text) > 0:
+            text = text[0].upper() + text[1:]
+        
+        return text
     
-    def _get_fallback_review(self, title: str, user_notes: str = "", rating: Optional[float] = None):
-        """Provide a meaningful fallback review when AI is unavailable"""
-        print("🔄 Using fallback review generator")
+    def _get_fallback_review(self, title: str, user_notes: str = "", rating: Optional[float] = None, length: str = "medium"):
+        """Provide high-quality fallback reviews when AI21 is unavailable"""
+        print(f"🔄 Using AI21 fallback review generator (length: {length})")
         
-        # Template-based fallback reviews
-        templates = [
-            "This {content_type} offers an engaging experience with memorable moments. The storytelling keeps you invested throughout.",
-            "A solid entry in its genre, {title} delivers on expectations with competent execution and entertaining sequences.",
-            "{title} presents an interesting premise that develops into a satisfying narrative with good pacing and character development.",
-            "With its unique approach and consistent quality, this {content_type} stands out as a worthwhile viewing experience.",
-            "The creative vision behind {title} results in a compelling watch that balances different elements effectively."
+        # Length-specific templates
+        short_templates = [
+            "A compelling {content_type} that delivers strong performances and engaging storytelling. The narrative flows smoothly with well-executed technical elements. {user_notes_integration}",
+            
+            "This {content_type} showcases impressive craftsmanship with memorable moments throughout. Character development and visual execution stand out as particular strengths. {user_notes_integration}",
+            
+            "With its thoughtful approach to storytelling and solid technical execution, this {content_type} offers a satisfying experience. {user_notes_integration}"
         ]
         
-        # Select template based on rating if available
-        if rating is not None:
-            if rating >= 8:
-                templates = [
-                    "An exceptional {content_type} that excels in multiple aspects. {title} demonstrates outstanding quality in storytelling and execution.",
-                    "Masterfully crafted, {title} represents the best of what this genre has to offer with superb attention to detail.",
-                    "A remarkable achievement in filmmaking, {title} delivers an unforgettable experience that resonates deeply.",
-                    "Outstanding in every regard, this {content_type} sets new standards with its brilliant execution and emotional depth."
-                ]
-            elif rating <= 4:
-                templates = [
-                    "While {title} has some interesting ideas, the execution falls short of its potential in several areas.",
-                    "This {content_type} struggles to find its footing, resulting in an uneven experience that could have been better developed.",
-                    "{title} shows glimpses of promise but ultimately doesn't fully deliver on its initial concept.",
-                    "Despite some positive elements, the overall experience of {title} is hampered by inconsistent quality."
-                ]
+        medium_templates = [
+            "This {content_type} demonstrates exceptional craftsmanship in both storytelling and technical execution. The narrative unfolds with precision, keeping viewers engaged from start to finish. {user_notes_integration} Character development is particularly noteworthy, with performances that bring depth and authenticity to the story.",
+            
+            "A masterful blend of compelling narrative and artistic expression, this {content_type} stands as a significant achievement. {user_notes_integration} The pacing is expertly handled, allowing both dramatic moments and character interactions to shine.",
+            
+            "With its sophisticated approach to storytelling and remarkable attention to detail, this {content_type} delivers an experience that is both intellectually stimulating and emotionally satisfying. {user_notes_integration} The ensemble cast delivers uniformly excellent performances."
+        ]
         
-        content_type = "movie" if "movie" in title.lower() else "show"
-        template = random.choice(templates)
+        long_templates = [
+            "This film represents a remarkable achievement in contemporary cinema, showcasing a level of craftsmanship that elevates it above typical genre offerings. The narrative structure is meticulously constructed, with each scene serving a distinct purpose in advancing both plot and character development. Director's vision is consistently evident throughout, from the carefully composed visual language to the nuanced handling of complex emotional themes. Performances across the board are exceptional, with each actor bringing depth and authenticity to their roles. Technical elements including cinematography, sound design, and editing work in perfect harmony to create an immersive viewing experience. {user_notes_integration} The film successfully balances entertainment value with artistic ambition, resulting in a work that both engages in the moment and resonates long after viewing.",
+            
+            "From its opening moments, this production establishes itself as a work of considerable artistic merit and technical proficiency. The storytelling approach demonstrates a confident understanding of narrative rhythm, knowing precisely when to accelerate tension and when to allow character moments to breathe. Visual composition throughout is striking yet purposeful, with each frame contributing meaningfully to the overall thematic tapestry. Character arcs are developed with remarkable subtlety and psychological insight, avoiding cliché while maintaining emotional accessibility. {user_notes_integration} The film's exploration of its central ideas is both intellectually rigorous and emotionally resonant, inviting multiple interpretations while maintaining narrative coherence."
+        ]
         
-        fallback_review = template.format(title=title, content_type=content_type)
+        # Select templates based on length
+        template_groups = {
+            "short": short_templates,
+            "medium": medium_templates,
+            "long": long_templates
+        }
         
-        # Add user notes if provided
+        templates = template_groups.get(length, medium_templates)
+        
+        # Handle user notes integration naturally
+        user_notes_integration = ""
         if user_notes.strip():
-            fallback_review += f" Note: {user_notes}"
+            user_notes_integration = f"The film particularly excels in {user_notes.lower()},"
+        
+        # Select templates based on rating
+        if rating is not None:
+            if rating >= 8.0:
+                templates = [t for t in templates if "exceptional" in t.lower() or "masterful" in t.lower() or "remarkable" in t.lower()]
+            elif rating >= 6.0:
+                templates = [t for t in templates if "solid" in t.lower() or "enjoyable" in t.lower() or "satisfying" in t.lower()]
+            else:
+                templates = [t for t in templates if "ambition" in t.lower() or "uneven" in t.lower() or "flaws" in t.lower()]
+        
+        content_type = "series" if "season" in title.lower() or "episode" in title.lower() else "film"
+        template = random.choice(templates) if templates else medium_templates[0]
+        
+        # Create personalized fallback review
+        fallback_review = template.format(
+            content_type=content_type,
+            user_notes_integration=user_notes_integration
+        )
         
         return fallback_review
 
@@ -1109,6 +1288,202 @@ class RecommendationEngine:
         
         return list(reasons)
 
+# Party Service
+class PartyService:
+    def __init__(self):
+        print("✅ Party Service initialized")
+    
+    def generate_room_code(self):
+        """Generate a unique 6-character room code"""
+        return ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=6))
+    
+    def create_party_room(self, db: Session, party_data: PartyRoomCreate):
+        """Create a new party room"""
+        try:
+            # Generate unique room code
+            code = self.generate_room_code()
+            
+            # Create initial members list with host
+            host_member = {
+                "id": party_data.host_id,
+                "name": "Host",
+                "is_host": True,
+                "joined_at": datetime.utcnow().isoformat()
+            }
+            members = [host_member]
+            
+            party_room = PartyRoom(
+                code=code,
+                movie_id=party_data.movie_id,
+                movie_title=party_data.movie_title,
+                movie_poster=party_data.movie_poster,
+                host_id=party_data.host_id,
+                is_active=True,
+                members=json.dumps(members)
+            )
+            
+            db.add(party_room)
+            db.commit()
+            db.refresh(party_room)
+            
+            print(f"🎉 Party room created: {code} for movie '{party_data.movie_title}'")
+            
+            return party_room
+            
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Error creating party room: {str(e)}")
+    
+    def join_party_room(self, db: Session, join_data: PartyJoinRequest):
+        """Join an existing party room"""
+        try:
+            party_room = db.query(PartyRoom).filter(
+                PartyRoom.code == join_data.room_code,
+                PartyRoom.is_active == True
+            ).first()
+            
+            if not party_room:
+                raise HTTPException(status_code=404, detail="Party room not found or inactive")
+            
+            # Parse existing members
+            members = json.loads(party_room.members)
+            
+            # Check if user is already in the room
+            if any(member["id"] == join_data.user_id for member in members):
+                raise HTTPException(status_code=400, detail="User already in party room")
+            
+            # Add new member
+            new_member = {
+                "id": join_data.user_id,
+                "name": join_data.user_name,
+                "is_host": False,
+                "joined_at": datetime.utcnow().isoformat()
+            }
+            members.append(new_member)
+            
+            # Update room members
+            party_room.members = json.dumps(members)
+            db.commit()
+            db.refresh(party_room)
+            
+            print(f"👤 User {join_data.user_name} joined party room: {join_data.room_code}")
+            
+            return party_room
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Error joining party room: {str(e)}")
+    
+    def leave_party_room(self, db: Session, room_code: str, user_id: str):
+        """Leave a party room"""
+        try:
+            party_room = db.query(PartyRoom).filter(
+                PartyRoom.code == room_code,
+                PartyRoom.is_active == True
+            ).first()
+            
+            if not party_room:
+                raise HTTPException(status_code=404, detail="Party room not found")
+            
+            # Parse existing members
+            members = json.loads(party_room.members)
+            
+            # Find and remove user
+            original_count = len(members)
+            members = [member for member in members if member["id"] != user_id]
+            
+            # If host left, end the party
+            if len(members) < original_count:
+                if user_id == party_room.host_id:
+                    # Host left - end the party
+                    party_room.is_active = False
+                    print(f"🎉 Party room {room_code} ended by host")
+                else:
+                    # Regular user left - update members
+                    party_room.members = json.dumps(members)
+                
+                db.commit()
+                db.refresh(party_room)
+                
+                print(f"👤 User {user_id} left party room: {room_code}")
+                return party_room
+            else:
+                raise HTTPException(status_code=404, detail="User not found in party room")
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Error leaving party room: {str(e)}")
+    
+    def end_party_room(self, db: Session, room_code: str):
+        """End a party room (host only)"""
+        try:
+            party_room = db.query(PartyRoom).filter(PartyRoom.code == room_code).first()
+            
+            if not party_room:
+                raise HTTPException(status_code=404, detail="Party room not found")
+            
+            party_room.is_active = False
+            db.commit()
+            
+            print(f"🎉 Party room {room_code} ended")
+            
+            return {"message": "Party room ended successfully"}
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Error ending party room: {str(e)}")
+    
+    def get_party_room(self, db: Session, room_code: str):
+        """Get party room details"""
+        try:
+            party_room = db.query(PartyRoom).filter(
+                PartyRoom.code == room_code,
+                PartyRoom.is_active == True
+            ).first()
+            
+            if not party_room:
+                raise HTTPException(status_code=404, detail="Party room not found or inactive")
+            
+            return party_room
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error getting party room: {str(e)}")
+    
+    def sync_playback(self, db: Session, sync_data: PartySyncRequest):
+        """Sync playback across party members"""
+        try:
+            party_room = db.query(PartyRoom).filter(
+                PartyRoom.code == sync_data.room_code,
+                PartyRoom.is_active == True
+            ).first()
+            
+            if not party_room:
+                raise HTTPException(status_code=404, detail="Party room not found")
+            
+            # In a real implementation, you would broadcast this to all connected clients
+            # For now, we just log the sync action
+            print(f"🎬 Playback sync in room {sync_data.room_code}: {sync_data.action} at {sync_data.timestamp}")
+            
+            return {
+                "message": "Playback synced",
+                "action": sync_data.action,
+                "timestamp": sync_data.timestamp,
+                "room_code": sync_data.room_code
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error syncing playback: {str(e)}")
+
 # FastAPI app
 app = FastAPI(title="MovieMate API")
 
@@ -1130,8 +1505,9 @@ def get_db():
         db.close()
 
 tmdb_service = TMDBService()
-ai_generator = AIReviewGenerator()
+ai21_generator = AI21ReviewGenerator()
 recommendation_engine = RecommendationEngine(tmdb_service)
+party_service = PartyService()
 
 # Helper function to ensure integer fields are never None
 def ensure_int_fields(movie_dict):
@@ -1143,25 +1519,204 @@ def ensure_int_fields(movie_dict):
     return movie_dict
 
 # Test endpoint
-@app.get("/tmdb/status")
-def check_tmdb_status():
-    test_results = tmdb_service.search_movies("avengers")
-    top_rated = tmdb_service.get_top_rated_movies(3)
-    highly_rated = tmdb_service.get_highly_rated_movies(3)
+@app.get("/ai21/status")
+def check_ai21_status():
     return {
-        "tmdb_configured": bool(TMDB_API_KEY or TMDB_ACCESS_TOKEN),
-        "api_key_set": bool(TMDB_API_KEY),
-        "access_token_set": bool(TMDB_ACCESS_TOKEN),
-        "test_search": "avengers",
-        "results_count": len(test_results),
-        "top_rated_count": len(top_rated),
-        "highly_rated_count": len(highly_rated),
-        "status": "✅ Working" if test_results else "❌ Not Working",
-        "cache_size": len(tmdb_service._cache),
-        "max_search_results": MAX_SEARCH_RESULTS,
-        "min_good_rating": MIN_GOOD_RATING,
-        "min_top_rating": MIN_TOP_RATING
+        "ai21_configured": bool(AI21_API_KEY),
+        "api_key_set": bool(AI21_API_KEY),
+        "status": "✅ AI21 Ready" if AI21_API_KEY else "❌ AI21 Not Configured",
+        "model": "j2-ultra",
+        "features": {
+            "ai_reviews": bool(AI21_API_KEY),
+            "professional_tone": True,
+            "rating_aware": True,
+            "fallback_system": True,
+            "length_control": True
+        }
     }
+
+# CORRECTED: Test AI21 review generation with JSON body and length parameter
+@app.post("/ai21/test-review")
+def test_ai21_review(request: TestReviewRequest):
+    if not AI21_API_KEY:
+        raise HTTPException(status_code=503, detail="AI21 API key not configured")
+    
+    try:
+        review = ai21_generator.generate_review(
+            request.title, 
+            request.user_notes, 
+            request.rating,
+            request.length
+        )
+        return {
+            "title": request.title,
+            "rating": request.rating,
+            "user_notes": request.user_notes,
+            "review": review,
+            "status": "success",
+            "length": len(review),
+            "review_type": request.length,
+            "provider": "AI21 Jurassic-2 Ultra"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Test failed: {str(e)}")
+
+# NEW: Quick short review endpoint
+@app.post("/ai21/quick-short-review")
+def quick_short_ai21_review():
+    """Quick test endpoint for short reviews"""
+    if not AI21_API_KEY:
+        raise HTTPException(status_code=503, detail="AI21 API key not configured")
+    
+    try:
+        review = ai21_generator.generate_review(
+            "Inception", 
+            "mind bending plot and great visuals", 
+            8.8,
+            "short"
+        )
+        return {
+            "title": "Inception",
+            "rating": 8.8,
+            "user_notes": "mind bending plot and great visuals",
+            "review": review,
+            "status": "success",
+            "review_type": "short",
+            "length": len(review),
+            "provider": "AI21 Jurassic-2 Ultra"
+        }
+    except Exception as e:
+        return {
+            "title": "Inception", 
+            "review": ai21_generator._get_fallback_review("Inception", "mind bending plot", 8.8, "short"),
+            "status": "fallback",
+            "review_type": "short",
+            "error": str(e)
+        }
+
+# Quick test endpoint
+@app.post("/ai21/quick-review")
+def quick_ai21_review():
+    """Quick test endpoint with hardcoded values"""
+    if not AI21_API_KEY:
+        raise HTTPException(status_code=503, detail="AI21 API key not configured")
+    
+    try:
+        review = ai21_generator.generate_review(
+            "Inception", 
+            "mind bending plot", 
+            8.8
+        )
+        return {
+            "title": "Inception",
+            "rating": 8.8,
+            "user_notes": "mind bending plot",
+            "review": review,
+            "status": "success",
+            "provider": "AI21 Jurassic-2 Ultra"
+        }
+    except Exception as e:
+        return {
+            "title": "Inception", 
+            "review": ai21_generator._get_fallback_review("Inception", "mind bending plot", 8.8),
+            "status": "fallback",
+            "error": str(e)
+        }
+
+# ULTIMATE FIX: Movie-specific AI review endpoint - NO DATABASE UPDATES
+@app.post("/movies/{movie_id}/generate-review", response_model=ReviewGenerationResponse)
+def generate_ai21_review(movie_id: int, request: ReviewGenerationRequest, db: Session = Depends(get_db)):
+    """
+    ULTIMATE FIX: Generate AI review without ANY database updates
+    Uses the same reliable pattern as /ai21/test-review
+    """
+    try:
+        # Step 1: Get movie title only (minimal DB operation)
+        db_movie = db.query(Movie).filter(Movie.id == movie_id).first()
+        if not db_movie:
+            raise HTTPException(status_code=404, detail="Movie not found")
+        
+        # Step 2: Generate review (EXACTLY like test endpoint)
+        review = ai21_generator.generate_review(
+            title=db_movie.title,
+            user_notes=request.user_notes,
+            rating=request.rating,
+            length=request.length
+        )
+        
+        # ⚠️ CRITICAL FIX: NO DATABASE UPDATES
+        # The review is returned to the frontend, which can choose to save it
+        # This makes it as reliable as /ai21/test-review
+        
+        print(f"✅ AI Review generated for '{db_movie.title}' (length: {request.length}) - Returning to frontend")
+        
+        return ReviewGenerationResponse(review=review)
+        
+    except Exception as e:
+        print(f"❌ Error in AI21 review generation: {e}")
+        # Provide fallback review (same as test endpoint fallback)
+        fallback_review = ai21_generator._get_fallback_review(
+            db_movie.title if 'db_movie' in locals() else "Movie",
+            request.user_notes,
+            request.rating,
+            request.length
+        )
+        return ReviewGenerationResponse(review=fallback_review)
+
+# NEW: AI21 Health Check
+@app.get("/ai21/health")
+def ai21_health_check():
+    """Comprehensive AI21 service health check"""
+    health_status = {
+        "ai21_configured": bool(AI21_API_KEY),
+        "api_key_length": len(AI21_API_KEY) if AI21_API_KEY else 0,
+        "base_url": AI21_BASE_URL,
+        "model": "j2-ultra",
+        "fallback_system": True,
+        "length_control": True,
+        "status": "✅ Operational" if AI21_API_KEY else "❌ Not Configured",
+        "timestamp": datetime.utcnow().isoformat(),
+        "endpoints": {
+            "test_review": "/ai21/test-review",
+            "quick_review": "/ai21/quick-review", 
+            "quick_short_review": "/ai21/quick-short-review",
+            "movie_review": "/movies/{id}/generate-review",
+            "health": "/ai21/health"
+        }
+    }
+    return health_status
+
+# DEBUG ENDPOINT: Simple version for testing
+@app.post("/debug/movies/{movie_id}/generate-review-simple")
+def debug_generate_review_simple(movie_id: int, request: ReviewGenerationRequest, db: Session = Depends(get_db)):
+    """Simplified version that mirrors test-review endpoint behavior"""
+    try:
+        # Just get the movie title
+        db_movie = db.query(Movie).filter(Movie.id == movie_id).first()
+        if not db_movie:
+            return {"error": "Movie not found", "movie_id": movie_id}
+        
+        # Generate review (NO database updates)
+        review = ai21_generator.generate_review(
+            db_movie.title,
+            request.user_notes, 
+            request.rating,
+            request.length
+        )
+        
+        return {
+            "success": True,
+            "movie_id": movie_id,
+            "title": db_movie.title,
+            "review": review,
+            "review_length": len(review),
+            "review_type": request.length,
+            "database_operations": "NONE",  # This is key!
+            "status": "Identical to /ai21/test-review behavior"
+        }
+        
+    except Exception as e:
+        return {"error": str(e), "movie_id": movie_id}
 
 # Clear TMDB cache endpoint
 @app.delete("/tmdb/cache")
@@ -1274,7 +1829,7 @@ def get_top_rated_content(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching top-rated content: {str(e)}")
 
-# NEW: Get highly rated movies (8+ ratings from discover endpoint)
+# Get highly rated movies (8+ ratings from discover endpoint)
 @app.get("/tmdb/highly-rated")
 def get_highly_rated_movies(limit: int = 3, db: Session = Depends(get_db)):
     """Get highly rated movies with 8+ ratings (better variety)"""
@@ -1438,50 +1993,6 @@ def create_movie(movie: MovieCreate, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error creating movie: {str(e)}")
-
-# Generate AI review - IMPROVED with better error handling
-@app.post("/movies/{movie_id}/generate-review", response_model=ReviewGenerationResponse)
-def generate_ai_review(movie_id: int, request: ReviewGenerationRequest, db: Session = Depends(get_db)):
-    try:
-        db_movie = db.query(Movie).filter(Movie.id == movie_id).first()
-        if not db_movie:
-            raise HTTPException(status_code=404, detail="Movie not found")
-        
-        # Check if AI service is configured
-        if not HUGGING_FACE_API_KEY:
-            raise HTTPException(
-                status_code=503, 
-                detail="AI review service is not configured. Please check your Hugging Face API key."
-            )
-        
-        review = ai_generator.generate_review(
-            title=db_movie.title,
-            user_notes=request.user_notes,
-            rating=request.rating
-        )
-        
-        # Update the movie with the generated review and optional rating
-        update_data = {}
-        if request.rating is not None:
-            update_data['rating'] = request.rating
-        update_data['review'] = review
-        
-        for field, value in update_data.items():
-            setattr(db_movie, field, value)
-        
-        db.commit()
-        
-        return ReviewGenerationResponse(review=review)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        print(f"❌ Error in AI review generation: {e}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Unable to generate AI review at this time. Please try again later or write your review manually."
-        )
 
 # Get movies with filters
 @app.get("/movies/", response_model=List[MovieResponse])
@@ -1672,6 +2183,183 @@ def get_fallback_recommendations(max_results: int = 10):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting fallback recommendations: {str(e)}")
 
+# Party Watcher Endpoints
+@app.post("/party/create", response_model=PartyRoomResponse)
+def create_party_room(party_data: PartyRoomCreate, db: Session = Depends(get_db)):
+    """Create a new party room for synchronized movie watching"""
+    try:
+        party_room = party_service.create_party_room(db, party_data)
+        
+        # Parse members for response
+        members = json.loads(party_room.members)
+        
+        return PartyRoomResponse(
+            id=party_room.id,
+            code=party_room.code,
+            movie_id=party_room.movie_id,
+            movie_title=party_room.movie_title,
+            movie_poster=party_room.movie_poster,
+            host_id=party_room.host_id,
+            created_at=party_room.created_at,
+            is_active=party_room.is_active,
+            members=members
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating party room: {str(e)}")
+
+@app.post("/party/join")
+def join_party_room(join_data: PartyJoinRequest, db: Session = Depends(get_db)):
+    """Join an existing party room"""
+    try:
+        party_room = party_service.join_party_room(db, join_data)
+        
+        # Parse members for response
+        members = json.loads(party_room.members)
+        
+        # Get movie details for response
+        movie = db.query(Movie).filter(Movie.id == party_room.movie_id).first()
+        movie_details = {
+            "id": movie.id if movie else party_room.movie_id,
+            "title": party_room.movie_title,
+            "poster_path": party_room.movie_poster,
+            "is_tv_show": movie.is_tv_show if movie else False
+        }
+        
+        return {
+            "room": {
+                "id": party_room.id,
+                "code": party_room.code,
+                "movie_id": party_room.movie_id,
+                "movie_title": party_room.movie_title,
+                "movie_poster": party_room.movie_poster,
+                "host_id": party_room.host_id,
+                "created_at": party_room.created_at,
+                "is_active": party_room.is_active,
+                "members": members
+            },
+            "movie": movie_details,
+            "members": members
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error joining party room: {str(e)}")
+
+@app.post("/party/leave")
+def leave_party_room(room_code: str, user_id: str, db: Session = Depends(get_db)):
+    """Leave a party room"""
+    try:
+        party_room = party_service.leave_party_room(db, room_code, user_id)
+        
+        if party_room.is_active:
+            # Parse updated members for response
+            members = json.loads(party_room.members)
+            return {
+                "message": "Left party room successfully",
+                "room": {
+                    "code": party_room.code,
+                    "members": members
+                }
+            }
+        else:
+            return {
+                "message": "Party room ended (host left)",
+                "room_ended": True
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error leaving party room: {str(e)}")
+
+@app.post("/party/end")
+def end_party_room(room_code: str, db: Session = Depends(get_db)):
+    """End a party room (host only)"""
+    try:
+        result = party_service.end_party_room(db, room_code)
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error ending party room: {str(e)}")
+
+@app.get("/party/{room_code}")
+def get_party_room(room_code: str, db: Session = Depends(get_db)):
+    """Get party room details"""
+    try:
+        party_room = party_service.get_party_room(db, room_code)
+        
+        # Parse members for response
+        members = json.loads(party_room.members)
+        
+        # Get movie details
+        movie = db.query(Movie).filter(Movie.id == party_room.movie_id).first()
+        movie_details = {
+            "id": movie.id if movie else party_room.movie_id,
+            "title": party_room.movie_title,
+            "poster_path": party_room.movie_poster,
+            "is_tv_show": movie.is_tv_show if movie else False,
+            "overview": movie.overview if movie else None
+        }
+        
+        return {
+            "room": {
+                "id": party_room.id,
+                "code": party_room.code,
+                "movie_id": party_room.movie_id,
+                "movie_title": party_room.movie_title,
+                "movie_poster": party_room.movie_poster,
+                "host_id": party_room.host_id,
+                "created_at": party_room.created_at,
+                "is_active": party_room.is_active,
+                "members": members
+            },
+            "movie": movie_details
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting party room: {str(e)}")
+
+@app.post("/party/sync")
+def sync_playback(sync_data: PartySyncRequest, db: Session = Depends(get_db)):
+    """Sync playback across party members"""
+    try:
+        result = party_service.sync_playback(db, sync_data)
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error syncing playback: {str(e)}")
+
+@app.post("/party/start")
+def start_party_watching(start_data: PartyStartRequest, db: Session = Depends(get_db)):
+    """Start synchronized watching session"""
+    try:
+        party_room = party_service.get_party_room(db, start_data.room_code)
+        
+        # In a real implementation, you would start the video playback for all members
+        # For now, we just return a success message
+        
+        return {
+            "message": "Party watching session started",
+            "room_code": start_data.room_code,
+            "movie_title": party_room.movie_title,
+            "started_at": datetime.utcnow().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting party watching: {str(e)}")
+
 # Health check
 @app.get("/health")
 def health_check():
@@ -1687,7 +2375,11 @@ def health_check():
             "top_rated_content": True,
             "highly_rated_content": True,
             "fast_search": True,
-            "ai_reviews": bool(HUGGING_FACE_API_KEY)
+            "ai_reviews": bool(AI21_API_KEY),
+            "ai_review_lengths": ["short", "medium", "long"],
+            "ai_provider": "AI21 Jurassic-2 Ultra",
+            "party_watcher": True,
+            "synchronized_watching": True
         }
     }
 

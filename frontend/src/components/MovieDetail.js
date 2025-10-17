@@ -302,55 +302,116 @@ function MovieDetail() {
     }
   };
 
-  // Generate AI review - ENHANCED with user notes
+  // FIXED: Generate AI review - Enhanced with better debugging
   const generateAIReview = async () => {
     if (!movie) return;
 
     try {
       setGeneratingAI(true);
 
+      console.log("🔄 === AI REVIEW GENERATION DEBUG ===");
+      console.log("📋 Movie ID:", movie.id);
+      console.log("🎬 Movie Title:", movie.title);
+      console.log("📝 AI Notes:", aiNotes);
+      console.log("⭐ Current Rating:", editForm.rating);
+      console.log("🔗 API Base URL:", API_BASE);
+
       const requestData = {
-        user_notes: aiNotes,
+        user_notes: aiNotes.trim(), // Added trim to remove whitespace
         rating: editForm.rating ? parseFloat(editForm.rating) : null,
       };
 
-      const response = await axios.post(
-        `${API_BASE}/movies/${movie.id}/generate-review`,
-        requestData
-      );
+      console.log("📤 Request Data:", requestData);
 
-      setEditForm((prev) => ({
-        ...prev,
-        review: response.data.review,
-      }));
+      // Test if the endpoint exists first
+      const endpoint = `${API_BASE}/movies/${movie.id}/generate-review`;
+      console.log("🔍 Testing endpoint:", endpoint);
 
-      setMovie({
-        ...movie,
-        review: response.data.review,
+      const response = await axios.post(endpoint, requestData, {
+        timeout: 30000, // 30 second timeout
+        validateStatus: function (status) {
+          return status < 500; // Resolve only if status code is less than 500
+        },
       });
 
-      // Clear AI notes after successful generation
-      setAiNotes("");
+      console.log("✅ AI Review Response Status:", response.status);
+      console.log("✅ AI Review Response Data:", response.data);
 
-      alert("AI review generated successfully!");
-    } catch (error) {
-      console.error("Error generating AI review:", error);
-      if (error.response?.data?.detail) {
-        alert(`Error: ${error.response.data.detail}`);
+      if (response.data.review) {
+        // Update both the form and movie state
+        setEditForm((prev) => ({
+          ...prev,
+          review: response.data.review,
+        }));
+
+        setMovie({
+          ...movie,
+          review: response.data.review,
+        });
+
+        // Clear AI notes after successful generation
+        setAiNotes("");
+
+        alert("✅ AI review generated successfully!");
       } else {
-        alert("Failed to generate AI review. Please try again.");
+        console.error("❌ No review content in response:", response.data);
+        alert(
+          "❌ AI generated empty review. Please try again with different notes."
+        );
+      }
+    } catch (error) {
+      console.error("❌ AI Review Generation Error:", error);
+
+      // Enhanced error logging
+      if (error.response) {
+        console.error("❌ Error Response Status:", error.response.status);
+        console.error("❌ Error Response Data:", error.response.data);
+        console.error("❌ Error Response Headers:", error.response.headers);
+      } else if (error.request) {
+        console.error("❌ No Response Received:", error.request);
+        console.error("❌ Request Config:", error.config);
+      } else {
+        console.error("❌ Error Message:", error.message);
+      }
+
+      // Enhanced error handling with specific messages
+      if (error.response?.status === 503) {
+        alert(
+          "🔧 AI service is currently unavailable. Please check your AI21 API key configuration."
+        );
+      } else if (error.response?.status === 404) {
+        alert(
+          "❌ Movie not found or AI endpoint unavailable. Please check if the movie exists and the backend is running."
+        );
+      } else if (error.response?.data?.detail) {
+        alert(`❌ AI Review Error: ${error.response.data.detail}`);
+      } else if (
+        error.code === "NETWORK_ERROR" ||
+        error.code === "ECONNREFUSED"
+      ) {
+        alert(
+          "🌐 Cannot connect to the server. Please make sure your backend is running on localhost:8000"
+        );
+      } else if (error.response?.status === 500) {
+        alert("⚙️ Server error. Check your backend logs for more details.");
+      } else {
+        alert(
+          "❌ Failed to generate AI review. Please check the console for detailed error messages."
+        );
       }
     } finally {
       setGeneratingAI(false);
     }
   };
 
-  // Quick AI Review with preset notes
+  // FIXED: Quick AI Review with preset notes
   const generateQuickAIReview = async (presetNotes = "") => {
     if (!movie) return;
 
     try {
       setGeneratingAI(true);
+
+      console.log("🚀 Quick AI Review with preset:", presetNotes);
 
       const requestData = {
         user_notes: presetNotes,
@@ -359,23 +420,122 @@ function MovieDetail() {
 
       const response = await axios.post(
         `${API_BASE}/movies/${movie.id}/generate-review`,
-        requestData
+        requestData,
+        {
+          timeout: 30000,
+          validateStatus: function (status) {
+            return status < 500;
+          },
+        }
       );
 
-      setEditForm((prev) => ({
-        ...prev,
-        review: response.data.review,
-      }));
+      console.log("✅ Quick AI Response:", response.data);
 
-      setMovie({
-        ...movie,
-        review: response.data.review,
+      if (response.data.review) {
+        setEditForm((prev) => ({
+          ...prev,
+          review: response.data.review,
+        }));
+
+        setMovie({
+          ...movie,
+          review: response.data.review,
+        });
+
+        alert("✅ AI review generated successfully!");
+      } else {
+        alert("❌ AI generated empty review. Please try again.");
+      }
+    } catch (error) {
+      console.error("Error generating quick AI review:", error);
+
+      if (error.response?.data?.detail) {
+        alert(`❌ AI Review Error: ${error.response.data.detail}`);
+      } else {
+        alert("❌ Failed to generate AI review. Please try again.");
+      }
+    } finally {
+      setGeneratingAI(false);
+    }
+  };
+
+  // NEW: Test AI21 connection directly (for debugging)
+  const testAI21Connection = async () => {
+    try {
+      setGeneratingAI(true);
+
+      // Test with the standalone AI21 endpoint
+      const testData = {
+        title: movie.title,
+        rating: editForm.rating ? parseFloat(editForm.rating) : null,
+        user_notes: aiNotes || "Test review generation",
+      };
+
+      console.log("🧪 Testing AI21 connection with:", testData);
+
+      const response = await axios.post(
+        `${API_BASE}/ai21/test-review`,
+        testData,
+        {
+          timeout: 30000,
+          validateStatus: function (status) {
+            return status < 500;
+          },
+        }
+      );
+
+      console.log("✅ AI21 Test Response:", response.data);
+
+      // If test is successful, use the generated review
+      if (response.data.review) {
+        setEditForm((prev) => ({
+          ...prev,
+          review: response.data.review,
+        }));
+
+        setMovie({
+          ...movie,
+          review: response.data.review,
+        });
+
+        setAiNotes("");
+        alert("✅ AI review generated successfully via test endpoint!");
+      } else {
+        alert("❌ Test endpoint returned empty review.");
+      }
+    } catch (error) {
+      console.error("❌ AI21 Connection Test Failed:", error);
+      alert(
+        `❌ AI21 Test Failed: ${error.response?.data?.detail || error.message}`
+      );
+    } finally {
+      setGeneratingAI(false);
+    }
+  };
+
+  // NEW: Check AI21 Health Status
+  const checkAI21Health = async () => {
+    try {
+      setGeneratingAI(true);
+
+      console.log("🏥 Checking AI21 Health...");
+
+      const response = await axios.get(`${API_BASE}/ai21/health`, {
+        timeout: 10000,
       });
 
-      alert("AI review generated successfully!");
+      console.log("✅ AI21 Health Status:", response.data);
+
+      if (response.data.ai21_configured) {
+        alert(
+          `✅ AI21 is configured and ready!\nStatus: ${response.data.status}\nModel: ${response.data.model}`
+        );
+      } else {
+        alert("❌ AI21 is not configured. Please check your API key.");
+      }
     } catch (error) {
-      console.error("Error generating AI review:", error);
-      alert("Failed to generate AI review. Please try again.");
+      console.error("❌ AI21 Health Check Failed:", error);
+      alert("❌ Cannot connect to AI21 service. Check if backend is running.");
     } finally {
       setGeneratingAI(false);
     }
@@ -629,10 +789,26 @@ function MovieDetail() {
     );
   };
 
-  // AI Review Section Component
+  // FIXED: AI Review Section Component with better error handling and debugging
   const AIReviewSection = () => (
     <div className="ai-review-section">
       <h4>🤖 AI Review Generator</h4>
+
+      {/* Connection Status */}
+      <div className="ai-status-info">
+        <small>
+          💡 <strong>Tip:</strong> Set a rating first for better AI reviews
+        </small>
+        <button
+          onClick={checkAI21Health}
+          className="btn btn-sm btn-outline health-btn"
+          disabled={generatingAI}
+          title="Check AI21 service status"
+        >
+          🏥 Check AI Health
+        </button>
+      </div>
+
       <div className="ai-review-options">
         <div className="quick-ai-buttons">
           <p>Quick templates:</p>
@@ -692,13 +868,27 @@ function MovieDetail() {
               placeholder="Add specific points you'd like the AI to focus on (e.g., 'great acting but weak ending', 'amazing visuals', etc.)"
               rows="3"
             />
-            <button
-              onClick={generateAIReview}
-              className="btn btn-primary ai-generate-btn"
-              disabled={generatingAI}
-            >
-              {generatingAI ? "🔄 Generating..." : "🤖 Generate Custom Review"}
-            </button>
+            <div className="ai-action-buttons">
+              <button
+                onClick={generateAIReview}
+                className="btn btn-primary ai-generate-btn"
+                disabled={generatingAI || !aiNotes.trim()}
+              >
+                {generatingAI
+                  ? "🔄 Generating..."
+                  : "🤖 Generate Custom Review"}
+              </button>
+
+              {/* Debug button - remove in production */}
+              <button
+                onClick={testAI21Connection}
+                className="btn btn-outline ai-test-btn"
+                disabled={generatingAI}
+                title="Test AI21 connection directly"
+              >
+                🧪 Test Connection
+              </button>
+            </div>
           </div>
         </div>
 
@@ -710,6 +900,10 @@ function MovieDetail() {
             <li>Set a rating first for more personalized reviews</li>
             <li>Be specific in your notes for better results</li>
             <li>You can edit the generated review afterwards</li>
+            <li>
+              If AI fails, check browser console for detailed error messages
+            </li>
+            <li>Use the "Check AI Health" button to verify service status</li>
           </ul>
         </div>
       </div>
