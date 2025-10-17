@@ -1,5 +1,6 @@
 fastapi==0.108.0
 uvicorn[standard]==0.23.2
 pydantic==2.4.2
-python-multipart==0.0.6  # if you handle file uploads
-requests==2.32.0          # optional, if you make HTTP calls
+sqlalchemy==2.0.21   # Add this
+python-multipart==0.0.6  # if needed
+requests==2.32.0          # optional
